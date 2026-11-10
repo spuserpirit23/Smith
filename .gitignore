@@ -1,0 +1,32 @@
+# secrets / device credentials
+.env
+.env.*
+!.env.example
+backend/sim.csv
+deploy/.env
+backend/.env
+*.nvs.csv
+*.nvs.bin
+deploy/terraform/**/terraform.tfvars
+deploy/terraform/**/.terraform/
+deploy/terraform/**/*.tfstate*
+# python
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+# firmware
+firmware/**/build/
+firmware/**/sdkconfig
+firmware/**/sdkconfig.old
+firmware/**/managed_components/
+firmware/**/dependencies.lock
+# local captures from `mitra-pc --check` (webcam photo, mic recording)
+pc/check_camera.jpg
+pc/check_mic.wav
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,118 @@
+# Mitra backend stack — runs unchanged on any Linux VM with Docker (AWS EC2, GCP, Azure,
+# Hetzner, a NUC in the office). Only ports 80/443 are published.
+#
+#   cp .env.example .env   # fill in
+#   docker compose up -d --build
+#
+name: mitra
+
+x-logging: &logging
+  driver: json-file
+  options: {max-size: "10m", max-file: "3"}   # short log retention (PRD privacy NFR)
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      MITRA_DOMAIN: ${MITRA_DOMAIN:?set MITRA_DOMAIN in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [api, mosquitto]
+    logging: *logging
+
+  api:
+    build:
+      context: ../backend
+      args: {EXTRAS: "${MITRA_EXTRAS:-local,speech}"}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MITRA_DATABASE_URL: postgresql://mitra:${POSTGRES_PASSWORD}@postgres:5432/mitra
+      MITRA_MQTT_HOST: mosquitto
+      MITRA_MQTT_PORT: "1883"
+      MITRA_MOSQUITTO_PASSWD_FILE: /mosquitto/auth/passwd
+      MITRA_PUBLIC_BASE_URL: https://${MITRA_DOMAIN}
+      MITRA_DATA_DIR: /data
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}
+      VISION_BASE_URL: ${VISION_BASE_URL:-http://ollama:11434/v1}
+    volumes:
+      - mosq_auth:/mosquitto/auth
+      - api_data:/data
+      - ../backend/config:/app/config:ro      # persona / provider config without rebuilding
+    depends_on:
+      postgres: {condition: service_healthy}
+      ollama-pull: {condition: service_completed_successfully}
+    mem_limit: 900m             # Piper voices (~65 MB each) live in this process
+    logging: *logging
+
+  # Local LLM + vision on the box's CPU: no per-token bill. Reached only on the internal network.
+  ollama:
+    image: ollama/ollama:0.32.11
+    restart: unless-stopped
+    environment:
+      OLLAMA_KEEP_ALIVE: "-1"           # never unload: a cold load adds seconds to the next reply
+      OLLAMA_CONTEXT_LENGTH: "4096"     # system prompt + 10 turns fits; bigger only costs RAM
+      OLLAMA_NUM_PARALLEL: "1"          # one turn at a time gets all cores (fastest per reply)
+      OLLAMA_MAX_LOADED_MODELS: "2"     # chat model + vision model (if different) stay resident
+    volumes: [ollama_models:/root/.ollama]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      retries: 30
+    mem_limit: ${OLLAMA_MEM_LIMIT:-6g}
+    logging: *logging
+
+  # One-shot: pull the configured models into the volume (no-op once present), then exit.
+  ollama-pull:
+    image: ollama/ollama:0.32.11
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      MODELS: "${LLM_MODEL:-qwen3:1.7b} ${VISION_MODEL:-gemma3:4b}"
+    entrypoint: ["/bin/sh", "-c", "for m in $$MODELS; do ollama pull $$m || exit 1; done"]
+    depends_on:
+      ollama: {condition: service_healthy}
+    restart: "no"
+    logging: *logging
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: mitra
+      POSTGRES_USER: mitra
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    command: ["postgres", "-c", "shared_buffers=64MB", "-c", "max_connections=30", "-c", "work_mem=4MB"]
+    volumes: [pg_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mitra -d mitra"]
+      interval: 5s
+      retries: 20
+    mem_limit: 300m
+    logging: *logging
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/mosquitto/config/entrypoint.sh"]
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/acl:/mosquitto/config/acl:ro
+      - ./mosquitto/entrypoint.sh:/mosquitto/config/entrypoint.sh:ro
+      - mosq_auth:/mosquitto/auth:ro
+      - mosq_data:/mosquitto/data
+    mem_limit: 64m
+    logging: *logging
+
+volumes:
+  caddy_data: {}
+  caddy_config: {}
+  api_data: {}
+  pg_data: {}
+  ollama_models: {}
+  mosq_auth: {}
+  mosq_data: {}

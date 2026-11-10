@@ -1,0 +1,135 @@
+# Mitra runtime configuration (FR-4.6: model, voice, language and persona are config, not code).
+#
+# Values may reference environment variables as ${VAR} or ${VAR:-default}.
+# Values of the form "ssm:/path/name" are fetched from AWS SSM Parameter Store at startup
+# (requires the `aws` extra); anything else is used literally. Secrets never live in this file.
+
+persona:
+  name: Mitra
+  wake_phrase: "Hey Smith"
+  language: en-IN            # BCP-47; drives STT language and default TTS voice
+  system_prompt_file: config/system_prompt.md
+  max_reply_sentences: 4     # keeps spoken replies short (latency + cost)
+  greeting: "Hi, I'm Mitra. How are you?"   # spoken on connect by hands-free clients (mitra-pc)
+
+conversation:
+  context_turns: 10          # FR-4.2: last N turns kept in session context
+  no_speech_timeout_s: 6     # FR-1.3
+  end_of_speech_silence_ms: 800
+  max_utterance_s: 15
+  max_repeat_prompts: 2      # FR-1.4
+  min_transcript_confidence: 0.45
+  follow_up_window_s: 4      # after a reply, listen this long without needing the wake word (0 = off)
+  hands_free_wait_s: 10      # hands-free clients: how long to wait for you to speak before going idle
+  playback_tail_ms: 350      # FR-3.2: mic stays gated this long after playback ends
+  timeouts:                  # FR-4.4
+    stt_s: 8
+    llm_s: 10
+    tts_s: 8
+  history:
+    persist: false           # FR-4.2: off unless Smith & Sky approves; per-device opt-in also required
+    retention_days: 7
+
+wake:
+  provider: ${MITRA_WAKE_PROVIDER:-none}   # none | openwakeword | mock
+  threshold: 0.5
+  refractory_s: 2.0
+  # Custom "Hey Smith" model trained with openWakeWord. Until trained, a stock model such as
+  # "hey_jarvis" can stand in for pipeline testing.
+  model: ${MITRA_WAKE_MODEL:-hey_jarvis}
+  preroll_s: 1.0
+
+stt:
+  provider: ${MITRA_STT_PROVIDER:-google}           # google | openai_compat | aws_transcribe | mock
+  aws_transcribe:
+    region: ${AWS_REGION:-ap-south-1}
+  openai_compat:
+    base_url: ${STT_BASE_URL:-https://api.groq.com/openai/v1}
+    api_key: ${STT_API_KEY:-}
+    model: ${STT_MODEL:-whisper-large-v3-turbo}
+  google:
+    # Free Google Web Speech endpoint; leave empty to use the library's built-in test key.
+    api_key: ${GOOGLE_STT_API_KEY:-}
+
+llm:
+  # Default: a small open model served by Ollama on the same machine (no per-token cost).
+  provider: ${MITRA_LLM_PROVIDER:-openai_compat}    # openai_compat | bedrock | anthropic | mock
+  max_tokens: 300
+  temperature: 0.6
+  bedrock:
+    region: ${BEDROCK_REGION:-ap-south-1}
+    # Claude Haiku 4.5 is reachable from ap-south-1 via the global profile (cheapest) or the
+    # India-only profile in.anthropic.claude-haiku-4-5-20251001-v1:0 (data stays in India, ~10% more).
+    model_id: ${BEDROCK_MODEL_ID:-global.anthropic.claude-haiku-4-5-20251001-v1:0}
+  anthropic:
+    api_key: ${ANTHROPIC_API_KEY:-}
+    model: ${ANTHROPIC_MODEL:-claude-haiku-4-5}
+  openai_compat:
+    # Local Ollama (docker-compose sets http://ollama:11434/v1). Any OpenAI-compatible server or
+    # hosted API also works (llama.cpp server, vLLM, Groq, Gemini...). See docs/LOCAL_MODELS.md.
+    base_url: ${LLM_BASE_URL:-http://localhost:11434/v1}
+    api_key: ${LLM_API_KEY:-}
+    model: ${LLM_MODEL:-qwen3:1.7b}
+    # Qwen3 is a thinking model: "none" turns reasoning off so replies start immediately.
+    reasoning_effort: ${LLM_REASONING_EFFORT:-none}   # none|low|...; empty = don't send the field
+
+tts:
+  # First provider is primary; the rest are automatic fallbacks (FR-6.5).
+  providers: ${MITRA_TTS_PROVIDERS:-piper_local}   # comma list: piper_local | polly | openai_compat | mock
+  sample_rate: 16000
+  polly:
+    region: ${AWS_REGION:-ap-south-1}
+    voice_id: ${POLLY_VOICE:-Kajal}
+    engine: ${POLLY_ENGINE:-neural}                 # neural | standard (standard is ~4x cheaper)
+  openai_compat:
+    base_url: ${TTS_BASE_URL:-https://api.openai.com/v1}
+    api_key: ${TTS_API_KEY:-}
+    model: ${TTS_MODEL:-gpt-4o-mini-tts}
+    voice: ${TTS_VOICE:-alloy}
+  piper_local:
+    # Runs on the box's CPU (~30x faster than real time). Voices are baked into the image.
+    model_path: ${PIPER_MODEL:-/models/piper/en_US-lessac-medium.onnx}
+    voices:                   # extra voices by ISO-639-1 code; Devanagari sentences use "hi"
+      hi: ${PIPER_MODEL_HI:-/models/piper/hi_IN-pratham-medium.onnx}
+
+vision:
+  # Default: Gemma 3 4B (multimodal) on the same Ollama as the chat model.
+  provider: ${MITRA_VISION_PROVIDER:-openai_compat} # openai_compat | bedrock | anthropic | rekognition | mock | none
+  min_confidence: 0.6       # FR-5.2
+  capture_timeout_s: 6
+  default_camera_role: user # which paired camera answers "what do you see?"
+  intents:                  # utterances that trigger a capture (case-insensitive regex)
+    - "\\b(can|do|could) you see\\b"
+    - "\\bwhat (do |can |could )?you (see|seeing)\\b"
+    - "\\bwhat are you (seeing|looking at)\\b"
+    - "\\b(look|looking|see) at (this|me|that|my|it)\\b"
+    - "\\btake a (look|picture|photo)\\b"
+    - "\\bwhat('s| is) (in front of you|this|that|here|in my hand)\\b"
+    - "\\bwhat am i (holding|wearing|doing|showing)\\b"
+    - "\\bhow do i look\\b"
+    - "\\bwhat colou?r is\\b"
+    - "\\bdescribe (the room|what you see|this|that|me|it)\\b"
+  bedrock:
+    region: ${BEDROCK_REGION:-ap-south-1}
+    model_id: ${BEDROCK_VISION_MODEL_ID:-global.anthropic.claude-haiku-4-5-20251001-v1:0}
+  anthropic:
+    api_key: ${ANTHROPIC_API_KEY:-}
+    model: ${ANTHROPIC_MODEL:-claude-haiku-4-5}
+  openai_compat:
+    base_url: ${VISION_BASE_URL:-http://localhost:11434/v1}
+    api_key: ${VISION_API_KEY:-}
+    model: ${VISION_MODEL:-gemma3:4b}
+    reasoning_effort: ${VISION_REASONING_EFFORT:-}
+  rekognition:
+    region: ${AWS_REGION:-ap-south-1}
+
+storage:
+  # Used for OTA firmware images and (only if enabled) debug frame retention.
+  provider: ${MITRA_STORAGE_PROVIDER:-local}        # local | s3 (any S3-compatible: AWS, R2, MinIO, GCS interop)
+  retain_debug_frames: false                        # FR-5.5
+  local:
+    root: ${MITRA_DATA_DIR:-/data}
+  s3:
+    bucket: ${S3_BUCKET:-}
+    region: ${AWS_REGION:-ap-south-1}
+    endpoint_url: ${S3_ENDPOINT_URL:-}

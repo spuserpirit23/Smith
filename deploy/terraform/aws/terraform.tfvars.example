@@ -1,0 +1,7 @@
+region             = "ap-south-1"
+env                = "proto"
+acme_email         = "ops@smithandsky.example"
+# domain           = "mitra.smithandsky.example"   # optional; defaults to <ip>.sslip.io
+# repo_url         = "https://github.com/<org>/mitra.git"
+budget_alert_email = "ops@smithandsky.example"
+monthly_budget_usd = 40

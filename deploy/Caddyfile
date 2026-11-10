@@ -1,0 +1,24 @@
+{
+	email {$ACME_EMAIL}
+}
+
+# MITRA_DOMAIN examples:
+#   mitra.example.com        -> automatic Let's Encrypt TLS
+#   13-234-5-6.sslip.io      -> free hostname for an Elastic IP, still gets real TLS
+#   :80                      -> plain HTTP for a LAN / lab box (devices then use ws:// and http://)
+{$MITRA_DOMAIN} {
+	# Prometheus metrics stay internal (handle blocks are mutually exclusive, most specific wins).
+	handle /metrics {
+		respond 404
+	}
+
+	# MQTT over WebSockets for the ESP32 boards (TLS terminates here).
+	handle /mqtt* {
+		reverse_proxy mosquitto:9001
+	}
+
+	handle {
+		reverse_proxy api:8080
+	}
+	# No access log: upload/OTA URLs carry short-lived tokens in the query string.
+}

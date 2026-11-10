@@ -1,0 +1,14 @@
+menu "Mitra camera node"
+    config MITRA_CAM_LED_GPIO
+        int "Capture indicator LED GPIO (-1 = none). AI-Thinker red LED = 33"
+        default 33
+    config MITRA_CAM_LED_ACTIVE_LOW
+        bool "Indicator LED is active low"
+        default y
+    config MITRA_CAM_IDLE_OFF_S
+        int "Power the sensor down after this many idle seconds"
+        default 60
+    config MITRA_CAM_PROV_POP
+        string "SoftAP provisioning proof-of-possession"
+        default "mitra-setup"
+endmenu

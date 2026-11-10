@@ -1,0 +1,46 @@
+name: ci
+on: [push, pull_request]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: {POSTGRES_PASSWORD: test, POSTGRES_DB: mitra_test}
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 10
+    defaults: {run: {working-directory: backend}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: sudo apt-get update && sudo apt-get install -y mosquitto
+      - run: pip install -e '.[dev,aws]'
+      - run: ruff check mitra tests
+      - run: pytest -q
+        env:
+          MITRA_TEST_DATABASE_URL: postgresql://postgres:test@localhost:5432/mitra_test
+          MITRA_TEST_MOSQUITTO: /usr/sbin/mosquitto
+
+  firmware:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.3.2
+    strategy:
+      matrix: {project: [main-board, camera-node]}
+    steps:
+      - uses: actions/checkout@v4
+      - name: build
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          cd firmware/${{ matrix.project }}
+          idf.py set-target esp32 build
+
+  deploy-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp deploy/.env.example deploy/.env && docker compose -f deploy/docker-compose.yml config -q
+      - uses: hashicorp/setup-terraform@v3
+      - run: cd deploy/terraform/aws && terraform init -backend=false && terraform validate

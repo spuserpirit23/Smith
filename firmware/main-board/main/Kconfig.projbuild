@@ -1,0 +1,89 @@
+menu "Mitra hardware"
+    comment "Defaults follow common ESP32 DIY voice-assistant wiring. VERIFY against the PCB (Milestone A)."
+
+    config MITRA_MIC_BCLK
+        int "INMP441 SCK (BCLK) GPIO"
+        default 14
+    config MITRA_MIC_WS
+        int "INMP441 WS (LRCLK) GPIO"
+        default 15
+    config MITRA_MIC_DIN
+        int "INMP441 SD (data) GPIO"
+        default 32
+    config MITRA_MIC_GAIN_SHIFT
+        int "Mic: right-shift from 32-bit I2S word to 16-bit (lower = louder)"
+        range 8 18
+        default 14
+
+    config MITRA_SPK_BCLK
+        int "MAX98357A BCLK GPIO"
+        default 26
+    config MITRA_SPK_WS
+        int "MAX98357A LRC GPIO"
+        default 25
+    config MITRA_SPK_DOUT
+        int "MAX98357A DIN GPIO"
+        default 22
+
+    config MITRA_OLED_SDA
+        int "SSD1306 SDA GPIO"
+        default 21
+    config MITRA_OLED_SCL
+        int "SSD1306 SCL GPIO"
+        default 4
+    config MITRA_OLED_ADDR
+        hex "SSD1306 I2C address"
+        default 0x3C
+
+    config MITRA_LED_GPIO
+        int "Status LED GPIO (-1 = none)"
+        default 2
+    config MITRA_PTT_GPIO
+        int "Push-to-talk button GPIO (active low; BOOT = 0)"
+        default 0
+    config MITRA_MUTE_GPIO
+        int "Hardware mute switch GPIO (-1 = none; active low = muted)"
+        default -1
+endmenu
+
+menu "Mitra behaviour"
+    choice MITRA_WAKE_MODE
+        prompt "Wake mode"
+        default MITRA_WAKE_CLOUD
+        help
+            cloud: VAD-gated audio is streamed and the backend detects "Hey Smith" (PRD FR-2.2).
+            ptt: push-to-talk only; nothing leaves the device unless the button is held.
+            device: reserved for a successful on-device wake-word spike (FR-2.1).
+        config MITRA_WAKE_CLOUD
+            bool "cloud"
+        config MITRA_WAKE_PTT
+            bool "ptt"
+        config MITRA_WAKE_DEVICE
+            bool "device"
+    endchoice
+
+    config MITRA_PREROLL_MS
+        int "Pre-roll sent when speech starts (ms)"
+        default 800
+    config MITRA_VAD_HANGOVER_MS
+        int "Keep streaming this long after speech stops (cloud wake mode)"
+        default 1200
+    config MITRA_PLAYBACK_BUFFER_MS
+        int "Speaker jitter buffer (ms)"
+        default 1000
+    config MITRA_PLAYBACK_PREBUFFER_MS
+        int "Start speaking after this much audio is buffered (ms)"
+        default 200
+    config MITRA_PLAYBACK_TAIL_MS
+        int "Mic stays gated after playback ends (ms)"
+        default 350
+    config MITRA_VOLUME_DEFAULT
+        int "Default volume (0-100)"
+        default 70
+    config MITRA_VOLUME_CAP
+        int "Volume cap (0-100), FR-3.1"
+        default 90
+    config MITRA_PROV_POP
+        string "SoftAP provisioning proof-of-possession"
+        default "mitra-setup"
+endmenu

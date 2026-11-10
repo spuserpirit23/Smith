@@ -1,0 +1,8 @@
+# Backend: full access to the Mitra tree.
+user mitra-backend
+topic readwrite mitra/#
+
+# Every device (MQTT username == device id) is confined to its own subtree.
+pattern read mitra/%u/cmd
+pattern write mitra/%u/state
+pattern write mitra/%u/telemetry

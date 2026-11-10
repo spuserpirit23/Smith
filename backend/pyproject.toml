@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mitra-backend"
+version = "0.1.0"
+description = "Mitra robot conversation backend (cloud-agnostic)"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi==0.115.6",
+  "uvicorn[standard]==0.34.0",
+  "pydantic==2.12.5",
+  "pydantic-settings==2.7.1",
+  "pyyaml==6.0.3",
+  "asyncpg==0.32.0",
+  "aiomqtt==2.3.0",
+  "numpy>=1.26,<3",
+  "httpx==0.28.1",
+  "prometheus-client==0.21.1",
+  "python-multipart==0.0.20",
+]
+
+[project.optional-dependencies]
+# AWS providers: Transcribe, Bedrock, Polly, Rekognition, S3, SSM
+aws = ["boto3>=1.35", "amazon-transcribe==0.6.2"]
+# Server-side "Hey Smith" detection (openWakeWord, ONNX inference). openwakeword itself must be
+# installed with --no-deps: its metadata pins tflite-runtime, which has no wheels for Python >= 3.12
+# and isn't needed for ONNX inference. The Dockerfile does this; locally:
+#   pip install '.[wake]' && pip install --no-deps openwakeword==0.6.0
+wake = ["onnxruntime>=1.18", "scipy>=1.11", "tqdm", "requests", "scikit-learn>=1.3"]
+# Google Web Speech STT (free, no key) via the SpeechRecognition library
+speech = ["SpeechRecognition>=3.14"]
+# Fully local / zero-API-cost TTS (CPU). Heavier image.
+local = ["piper-tts>=1.2"]
+# Opus uplink decoding (needs libopus on the host)
+opus = ["opuslib==3.0.1"]
+# Run Mitra on a PC: laptop mic/speaker as the main board, webcam as the camera (mitra-pc)
+pc = ["sounddevice>=0.5", "opencv-python>=4.9"]
+dev = ["pytest==8.3.4", "pytest-asyncio==0.25.0", "websockets>=13", "ruff==0.8.4"]
+
+[project.scripts]
+mitra = "mitra.cli:main"
+mitra-sim = "mitra.sim:main"
+mitra-pc = "mitra.pc:main"
+
+[tool.setuptools.packages.find]
+include = ["mitra*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"

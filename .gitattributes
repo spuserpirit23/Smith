@@ -1,0 +1,9 @@
+# Keep LF everywhere: shell scripts, Dockerfiles and configs run on Linux servers/containers.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.jpg binary
+*.png binary
+*.wav binary
+*.onnx binary
+*.bin binary
