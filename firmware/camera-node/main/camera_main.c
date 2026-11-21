@@ -7,6 +7,7 @@
 //
 // No continuous video, no local storage (FR-5.1/5.7). The red LED is on while capturing
 // (FR-5.1 indicator) and the sensor is powered down after an idle period.
+#include <stdlib.h>
 #include <string.h>
 
 #include "cJSON.h"
@@ -21,6 +22,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "img_converters.h"
 #include "mitra_common.h"
 #include "mqtt_client.h"
 #include "nvs_flash.h"
@@ -57,6 +59,8 @@ static esp_mqtt_client_handle_t s_mqtt;
 static QueueHandle_t s_jobs;
 static char s_t_cmd[96], s_t_state[96], s_t_tele[96];
 static bool s_cam_on, s_connected;
+// Sensors without a hardware JPEG encoder (e.g. GC2145): capture RGB565, encode JPEG in software.
+static bool s_soft_jpeg;
 static int64_t s_last_use_us;
 
 static void led(bool on)
@@ -83,6 +87,19 @@ static void publish_result(const char *job, const char *status, size_t bytes, in
     esp_mqtt_client_publish(s_mqtt, s_t_tele, msg, 0, 0, 0);
 }
 
+// Raw RGB565 frames are ~8x larger than JPEG. VGA at 20 MHz XCLK overflowed the DMA (cam_hal
+// "EV-EOF-OVF"); at 10 MHz the GC2145 delivered all-zero frames. QVGA at 20 MHz keeps the data
+// rate manageable, and 320x240 is plenty for a small vision model.
+#define SOFT_JPEG_SIZE FRAMESIZE_QVGA
+static void soft_jpeg_cfg(camera_config_t *c)
+{
+    c->pixel_format = PIXFORMAT_RGB565;
+    c->frame_size = SOFT_JPEG_SIZE;
+    c->xclk_freq_hz = 10000000;
+    c->fb_count = 2;
+    c->grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+}
+
 static bool camera_on(void)
 {
     if (s_cam_on) return true;
@@ -94,7 +111,16 @@ static bool camera_on(void)
         .pixel_format = PIXFORMAT_JPEG, .frame_size = FRAMESIZE_VGA, .jpeg_quality = 12,
         .fb_count = 1, .fb_location = CAMERA_FB_IN_PSRAM, .grab_mode = CAMERA_GRAB_LATEST,
     };
+    if (s_soft_jpeg) soft_jpeg_cfg(&c);
     esp_err_t err = esp_camera_init(&c);
+    if (err == ESP_ERR_NOT_SUPPORTED && !s_soft_jpeg) {
+        // e.g. GC2145: no on-chip JPEG. Retry with raw RGB565 and encode on the ESP32.
+        ESP_LOGW(TAG, "sensor has no hardware JPEG; using RGB565 + software JPEG");
+        esp_camera_deinit();
+        s_soft_jpeg = true;
+        soft_jpeg_cfg(&c);
+        err = esp_camera_init(&c);
+    }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "camera init failed: %s (check module, PSRAM and 5 V supply)", esp_err_to_name(err));
         return false;
@@ -152,19 +178,46 @@ static void capture_task(void *arg)
         } else {
             sensor_t *s = esp_camera_sensor_get();
             if (s) {
-                s->set_framesize(s, job.size);
-                s->set_quality(s, job.quality);
+                if (!s_soft_jpeg) {
+                    s->set_framesize(s, job.size);
+                    s->set_quality(s, job.quality);
+                }
             }
-            // The first frame after power-up / a size change is often under-exposed: drop one.
-            camera_fb_t *fb = esp_camera_fb_get();
-            if (fb) esp_camera_fb_return(fb);
-            fb = esp_camera_fb_get();
+            // The first frames after power-up / a size change are under-exposed (auto exposure has
+            // not settled; GC2145 needs a few). Drop them, logging a brightness sample of each.
+            int warmup = s_soft_jpeg ? 4 : 1;
+            camera_fb_t *fb = NULL;
+            for (int i = 0; i <= warmup; i++) {
+                if (fb) esp_camera_fb_return(fb);
+                fb = esp_camera_fb_get();
+                if (!fb) break;
+                uint32_t sum = 0, nz = 0;
+                size_t step = fb->len > 4096 ? fb->len / 4096 : 1;
+                for (size_t k = 0; k < fb->len; k += step) { sum += fb->buf[k]; nz += fb->buf[k] != 0; }
+                ESP_LOGI(TAG, "frame %d: %ux%u fmt=%d len=%u avg_byte=%u nonzero=%u/4096", i, (unsigned)fb->width,
+                         (unsigned)fb->height, (int)fb->format, (unsigned)fb->len, (unsigned)(sum / 4096),
+                         (unsigned)nz);
+            }
             if (!fb) {
                 err = "capture";
             } else {
                 int status = 0;
-                bytes = fb->len;
-                if (upload(job.url, fb->buf, fb->len, &status) != ESP_OK || status != 200) err = "upload";
+                const uint8_t *jpg = fb->buf;
+                size_t jpg_len = fb->len;
+                uint8_t *soft = NULL;
+                if (s_soft_jpeg) {
+                    // OV2640 quality scale (10 best .. 63 worst) -> encoder scale (0..100).
+                    int q = 100 - job.quality * 3 / 2;
+                    if (q < 40) q = 40;
+                    if (q > 90) q = 90;
+                    if (!fmt2jpg(fb->buf, fb->len, fb->width, fb->height, fb->format, q, &soft, &jpg_len)) {
+                        err = "encode";
+                    }
+                    jpg = soft;
+                }
+                bytes = jpg_len;
+                if (!err && (upload(job.url, jpg, jpg_len, &status) != ESP_OK || status != 200)) err = "upload";
+                free(soft);
                 esp_camera_fb_return(fb);   // frame is discarded immediately (FR-5.5)
             }
         }

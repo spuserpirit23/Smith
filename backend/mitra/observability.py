@@ -39,10 +39,23 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(out, default=str)
 
 
+class TextFormatter(logging.Formatter):
+    """Human-readable lines that still show the `extra={...}` fields (device, err, ...)."""
+    _skip = JsonFormatter._skip
+
+    def __init__(self) -> None:
+        super().__init__("%(asctime)s %(levelname)s %(name)s %(message)s")
+
+    def format(self, record: logging.LogRecord) -> str:
+        line = super().format(record)
+        extras = " ".join(f"{k}={v}" for k, v in record.__dict__.items()
+                          if k not in self._skip and not k.startswith("_"))
+        return f"{line}  [{extras}]" if extras else line
+
+
 def setup_logging(level: str = "INFO", as_json: bool = True) -> None:
     handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(JsonFormatter() if as_json else logging.Formatter(
-        "%(asctime)s %(levelname)s %(name)s %(message)s"))
+    handler.setFormatter(JsonFormatter() if as_json else TextFormatter())
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(level)

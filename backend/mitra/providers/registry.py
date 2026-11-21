@@ -10,7 +10,7 @@ from .storage import LocalStore, S3Store
 from .stt import AwsTranscribeSTT, GoogleSTT, MockSTT, OpenAICompatSTT
 from .tts import FallbackTTS, MockTTS, OpenAICompatTTS, PiperLocalTTS, PollyTTS
 from .vision import AnthropicVision, BedrockVision, MockVision, OpenAICompatVision, RekognitionVision
-from .wake import MockWakeFactory, OpenWakeWordFactory
+from .wake import MockWakeFactory, OpenWakeWordFactory, SttKeywordFactory
 
 
 @dataclass
@@ -84,6 +84,11 @@ def build_wake(cfg: AppConfig) -> WakeWordFactory | None:
                                    float(cfg.get("wake.refractory_s", 2.0)))
     if kind == "mock":
         return MockWakeFactory()
+    if kind == "stt":
+        words = cfg.get("wake.words", "smith")
+        if isinstance(words, str):
+            words = [w.strip() for w in words.split(",") if w.strip()]
+        return SttKeywordFactory(words)
     raise ValueError(f"unknown wake provider {kind!r}")
 
 
@@ -97,7 +102,9 @@ def build_vision(cfg: AppConfig) -> VisionProvider | None:
     if kind == "anthropic":
         return AnthropicVision(c.get("api_key", ""), c["model"])
     if kind == "openai_compat":
-        return OpenAICompatVision(c["base_url"], c.get("api_key", ""), c["model"], c.get("reasoning_effort", "") or "")
+        return OpenAICompatVision(c["base_url"], c.get("api_key", ""), c["model"], c.get("reasoning_effort", "") or "",
+                                  prompt_style=c.get("prompt_style", "json") or "json",
+                                  timeout_s=float(c.get("timeout_s", 20) or 20))
     if kind == "rekognition":
         return RekognitionVision(c["region"])
     if kind == "mock":

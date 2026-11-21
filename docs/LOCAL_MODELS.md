@@ -4,10 +4,10 @@ The default stack has no per-use AI bill. The server runs its own models:
 
 | Stage | Default | Runs where | Swap via |
 |---|---|---|---|
-| LLM | **Qwen3 1.7B**, thinking off (`qwen3:1.7b`, Ollama) | `ollama` container, CPU | `LLM_MODEL` |
+| LLM | **Gemma 3 4B** (`gemma3:4b`, Ollama), the same model as vision | `ollama` container, CPU | `LLM_MODEL` |
 | Vision ("what do you see?") | **Gemma 3 4B** multimodal (`gemma3:4b`, Ollama) | same `ollama` container | `VISION_MODEL`, or `MITRA_VISION_PROVIDER=none` |
 | TTS | **Piper** (`en_US-lessac-medium` + `hi_IN-pratham-medium`) | inside the `api` process, CPU | `PIPER_MODEL`, `PIPER_MODEL_HI` |
-| STT | Google Web Speech (free, no key; not local) | Google | see "STT" below |
+| STT | Google Web Speech (free, no key; not local), or local Whisper | Google / `tools/whisper_server.py` | see "STT" below |
 
 Hosted providers (Bedrock, Polly, Gemini, OpenAI...) are still there. They're config only, see
 `backend/config/mitra.yaml`.
@@ -72,7 +72,8 @@ cache per model at a 4k context. CPU: prompt evaluation scales with cores, and a
 
 | Setup | Fits on |
 |---|---|
-| qwen3:1.7b + gemma3:4b vision (default) | 4 vCPU / 16 GB, e.g. AWS `m7g.xlarge` (Terraform default) |
+| gemma3:4b for chat + vision (default, one model in RAM) | 4 vCPU / 8–16 GB, e.g. AWS `m7g.xlarge` (Terraform default) |
+| qwen3:1.7b chat + gemma3:4b vision | 4 vCPU / 16 GB, e.g. `m7g.xlarge` |
 | qwen3:1.7b, vision off | 4 vCPU / 8 GB, e.g. `c7g.xlarge` |
 | Any of the above, a GPU box | First-turn latency drops below 0.5 s; Ollama uses the GPU automatically |
 
@@ -80,20 +81,19 @@ These numbers come from a 16-thread laptop. A 4-vCPU server is slower at prompt 
 benchmark on the real instance before a demo:
 
 ```bash
-docker compose exec ollama ollama run qwen3:1.7b --verbose "Hi"   # prints prompt/eval tokens per second
+docker compose exec ollama ollama run gemma3:4b --verbose "Hi"   # prints prompt/eval tokens per second
 ```
 
 ## Running locally (Windows / macOS / Linux)
 
 ```powershell
 # 1. Install Ollama (https://ollama.com/download), then:
-ollama pull qwen3:1.7b
-ollama pull gemma3:4b
+ollama pull gemma3:4b      # chat + vision (qwen3:1.7b is the faster, lighter chat option)
 # 2. Piper voices (put the paths in backend/.env as PIPER_MODEL / PIPER_MODEL_HI)
 #    https://huggingface.co/rhasspy/piper-voices  en/en_US/lessac/medium, hi/hi_IN/pratham/medium
 pip install -e ".[local,speech,pc]"
 # 3. backend/.env
-#    MITRA_LLM_PROVIDER=openai_compat  LLM_BASE_URL=http://localhost:11434/v1  LLM_MODEL=qwen3:1.7b
+#    MITRA_LLM_PROVIDER=openai_compat  LLM_BASE_URL=http://localhost:11434/v1  LLM_MODEL=gemma3:4b
 #    LLM_REASONING_EFFORT=none  MITRA_VISION_PROVIDER=openai_compat  VISION_BASE_URL=http://localhost:11434/v1
 #    VISION_MODEL=gemma3:4b  MITRA_TTS_PROVIDERS=piper_local
 mitra check-providers --image ../pc/check_camera.jpg     # one LLM + one vision call
@@ -101,9 +101,41 @@ mitra check-providers --image ../pc/check_camera.jpg     # one LLM + one vision 
 
 ## STT
 
-STT is the one stage not yet on the box. The default `google` provider is free (Google Web
-Speech, no key) but it's an unofficial endpoint with no SLA. For fully offline speech recognition,
-run a Whisper server with an OpenAI-compatible `/audio/transcriptions` endpoint (e.g.
-faster-whisper / speaches) next to Ollama and set `MITRA_STT_PROVIDER=openai_compat`,
-`STT_BASE_URL=http://<whisper>:8000/v1`, `STT_MODEL=<model>`. No code change is needed. Budget
-another ~1–2 GB RAM and expect 0.5–1.5 s per utterance on CPU with a small/base model.
+The default `google` provider is free (Google Web Speech, no key) but it's an online, unofficial
+endpoint with no SLA. For offline speech recognition, run a Whisper server with an
+OpenAI-compatible `/audio/transcriptions` endpoint and point the `openai_compat` STT provider at
+it. No backend code change is needed.
+
+### Local Whisper on a PC (`tools/whisper_server.py`)
+
+A small faster-whisper server (CPU, int8) with the endpoint the backend expects. It needs its own
+venv; faster-whisper's CTranslate2 wheels are most reliable on Python 3.11.
+
+```powershell
+uv venv --python 3.11 $env:LOCALAPPDATA/mitra/whisper-venv
+uv pip install --python $env:LOCALAPPDATA/mitra/whisper-venv/Scripts/python.exe `
+    faster-whisper fastapi "uvicorn[standard]" python-multipart
+& $env:LOCALAPPDATA/mitra/whisper-venv/Scripts/python.exe tools/whisper_server.py   # port 8000
+```
+
+`backend/.env`:
+
+```
+MITRA_STT_PROVIDER=openai_compat
+STT_BASE_URL=http://localhost:8000/v1
+STT_MODEL=small
+```
+
+The first start downloads the model from Hugging Face (`small` is ~480 MB; about 3.5 min on a
+home connection), then it's cached. Choose another size with `WHISPER_MODEL`
+(`tiny|base|small|medium|distil-large-v3`); the backend's `STT_MODEL` is only a label.
+
+Measured 12 Nov 2026 on the i7-13620H laptop, `small`, int8, greedy decoding: a 3.3 s sentence
+took 1.4 s (warm) and came back word-perfect except "a" → "the", confidence 0.84. Budget ~1 GB RAM.
+
+Notes:
+* The backend sends `language` from `persona.language` (`en-IN` → `en`), so Whisper transcribes as
+  English. Hindi speech comes back transliterated or translated, not in Devanagari.
+* The server has no auth and binds to `127.0.0.1`. Don't expose it.
+* With Docker, [speaches](https://github.com/speaches-ai/speaches) is an alternative with the
+  same endpoint.

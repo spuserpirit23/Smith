@@ -128,13 +128,16 @@ void ws_link_start(const mitra_creds_t *c)
 bool ws_link_send_json(const char *json)
 {
     if (!g_app.ws_connected) return false;
-    return esp_websocket_client_send_text(s_client, json, strlen(json), pdMS_TO_TICKS(1000)) >= 0;
+    return esp_websocket_client_send_text(s_client, json, strlen(json), pdMS_TO_TICKS(3000)) >= 0;
 }
 
 bool ws_link_send_audio(const uint8_t *pcm, size_t len)
 {
     if (!g_app.ws_connected) return false;
-    return esp_websocket_client_send_bin(s_client, (const char *)pcm, len, pdMS_TO_TICKS(500)) >= 0;
+    // A timed-out write makes the client drop the whole connection, so allow for phone-hotspot
+    // stalls (seen > 500 ms). This runs in the uplink sender task; its queue drops the oldest
+    // frames meanwhile, so the mic is never blocked.
+    return esp_websocket_client_send_bin(s_client, (const char *)pcm, len, pdMS_TO_TICKS(3000)) >= 0;
 }
 
 void ws_link_pause(uint32_t seconds)

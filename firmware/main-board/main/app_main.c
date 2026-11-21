@@ -47,9 +47,17 @@ static void set_state(app_state_t s)
 
 static void send_hello(void)
 {
+    // Greet on the first connection after power-on only (audible "I'm ready"), not after every
+    // Wi-Fi/WebSocket reconnect.
+    static bool s_greeted;
     char msg[320];
     snprintf(msg, sizeof(msg),
              "{\"type\":\"hello\",\"version\":1,\"fw\":\"%s\",\"wake\":\"%s\","
+             "\"greet\":%s,"
+#if CONFIG_MITRA_HANDS_FREE
+             // No button or wake word needed: after the greeting the backend keeps listening.
+             "\"hands_free\":true,\"always_listen\":true,"
+#endif
              "\"audio\":{\"codec\":\"pcm16\",\"sample_rate\":16000,\"channels\":1,\"frame_ms\":20,"
              "\"playback_buffer_ms\":%d}}",
              MITRA_FW_VERSION,
@@ -60,8 +68,9 @@ static void send_hello(void)
 #else
              "ptt",
 #endif
+             s_greeted ? "false" : "true",
              CONFIG_MITRA_PLAYBACK_BUFFER_MS);
-    ws_link_send_json(msg);
+    if (ws_link_send_json(msg)) s_greeted = true;
 }
 
 static void wifi_cb(bool up)

@@ -332,7 +332,60 @@ class PostgresRepo:
         return {"turns": int(t.split()[-1]), "metrics": int(m.split()[-1]), "activations": int(a.split()[-1])}
 
 
+class FileRepo(MemoryRepo):
+    """MemoryRepo whose *devices* survive restarts, saved as JSON (local single-machine use).
+
+    ``DATABASE_URL=file:/path/devices.json``. Only device records are persisted (secret hashes,
+    never secrets); conversation turns, metrics and activations stay in memory as before.
+    """
+
+    _DATES = ("last_seen", "created_at")
+
+    def __init__(self, path: str) -> None:
+        super().__init__()
+        from pathlib import Path
+
+        self.path = Path(path)
+
+    async def init(self) -> None:
+        if not self.path.exists():
+            return
+        for raw in json.loads(self.path.read_text(encoding="utf-8")):
+            for k in self._DATES:
+                if raw.get(k):
+                    raw[k] = dt.datetime.fromisoformat(raw[k])
+            d = Device(**raw)
+            self.devices[d.id] = d
+
+    def _save(self) -> None:
+        rows = []
+        for d in self.devices.values():
+            row = asdict(d)
+            for k in self._DATES:
+                if row.get(k):
+                    row[k] = row[k].isoformat()
+            rows.append(row)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        tmp.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+        tmp.replace(self.path)   # atomic: a crash mid-write never leaves a half file
+
+    async def create_device(self, d: Device) -> None:
+        await super().create_device(d)
+        self._save()
+
+    async def update_device(self, device_id: str, **fields: Any) -> None:
+        await super().update_device(device_id, **fields)
+        self._save()
+
+    async def delete_device(self, device_id: str) -> None:
+        await super().delete_device(device_id)
+        self._save()
+
+
 def make_repo(dsn: str) -> Repo:
+    if dsn.startswith("file:"):
+        return FileRepo(dsn[len("file:"):])
     return PostgresRepo(dsn) if dsn else MemoryRepo()
 
 

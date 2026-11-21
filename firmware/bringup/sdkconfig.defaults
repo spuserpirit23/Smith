@@ -1,0 +1,5 @@
+CONFIG_IDF_TARGET="esp32"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+# The I2C pin scan takes a few seconds; don't let the task watchdog trip on it.
+CONFIG_ESP_TASK_WDT_EN=n

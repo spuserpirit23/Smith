@@ -18,8 +18,8 @@ import time
 import uuid
 from typing import Any, AsyncIterator, Awaitable, Callable
 
-from ..audio.pcm import bytes_to_ms
-from ..audio.vad import EndpointDetector
+from ..audio.pcm import bytes_to_ms, rms_dbfs
+from ..audio.vad import FRAME_BYTES, EndpointDetector
 from ..observability import (AUDIO_IN_SECONDS, PROVIDER_ERRORS, STAGE_LATENCY, STT_SECONDS, TTS_CHARS,
                              TURNS, WAKE_EVENTS)
 from ..providers.base import ChatMessage, ProviderError
@@ -45,10 +45,11 @@ def span(a: float | None, b: float | None) -> float | None:
 class Turn:
     """Audio plumbing for one user utterance."""
 
-    def __init__(self, mode: str, end_silence_ms: int, max_utterance_s: float, skip_ms: float = 0):
+    def __init__(self, mode: str, end_silence_ms: int, max_utterance_s: float, skip_ms: float = 0,
+                 noise_db: float | None = None):
         self.mode = mode                       # wake | ptt | follow_up | repeat | converse
         self.queue: asyncio.Queue[bytes | None] = asyncio.Queue()
-        self.vad = EndpointDetector(end_silence_ms=end_silence_ms)
+        self.vad = EndpointDetector(end_silence_ms=end_silence_ms, noise_db=noise_db)
         self.speech_started = asyncio.Event()
         self.ended = asyncio.Event()
         self.end_reason = ""
@@ -140,13 +141,17 @@ class DeviceSession:
         self.wake_mode = hello.get("wake", "cloud")  # cloud | device | ptt
         # Dev boards / the PC client may carry their own camera; captures then go over this socket.
         self.has_camera = bool(hello.get("camera"))
-        self.playback_lead_ms = float(audio.get("playback_buffer_ms", 1200)) * 0.75
+        # Half the device buffer: the device starts playing only after network delay plus its
+        # prebuffer, so 0.75 overflowed it on a laggy phone hotspot ("jitter buffer full").
+        self.playback_lead_ms = float(audio.get("playback_buffer_ms", 1200)) * 0.5
         self.language = self.cfg.get("persona.language", "en-IN")
         self.detector = rt.p.wake.create() if (self.wake_mode == "cloud" and rt.p.wake) else None
         # Hands-free clients (e.g. the PC client): greet on connect, then keep listening after
         # every reply without needing the wake word or a button.
         self.greet = bool(hello.get("greet"))
         self.hands_free = bool(hello.get("hands_free"))
+        # always_listen: a hands-free window that hears nothing reopens instead of going idle.
+        self.always_listen = self.hands_free and bool(hello.get("always_listen"))
         self.greeting = str(self.cfg.get("persona.greeting", "") or "").strip()
 
         c = self.cfg.section("conversation")
@@ -239,6 +244,7 @@ class DeviceSession:
         await self.send_json({"type": "tts", "state": "start"})
         await self.set_phase("responding")
         await self.send_json({"type": "tts", "state": "sentence", "text": text})
+        log.info("speaking: %r", text, extra={"device": self.device.id})
         TTS_CHARS.labels(self.rt.p.tts.providers[0].name).inc(len(text))
 
         async def run() -> None:
@@ -251,6 +257,9 @@ class DeviceSession:
     async def close(self, reason: str) -> None:
         if self.closed:
             return
+        kw = getattr(self, "_kw_task", None)
+        if kw is not None and not kw.done():
+            kw.cancel()
         await self._cancel_turn()
         self._cancel_guard()
         await self._flush_metrics()
@@ -260,13 +269,71 @@ class DeviceSession:
             await self._close_ws(1000, reason)
 
     # -- uplink -------------------------------------------------------------------------------
+    def _track_room_noise(self, chunk: bytes) -> None:
+        """Estimate background noise from idle uplink (follows quiet frames fast, loud ones slowly),
+        so each turn's end-of-speech detector starts from the real room level."""
+        for i in range(0, len(chunk) - FRAME_BYTES + 1, FRAME_BYTES):
+            level = rms_dbfs(chunk[i:i + FRAME_BYTES])
+            est = getattr(self, "room_noise_db", None)
+            if est is None:
+                self.room_noise_db = level
+            elif level < est:
+                self.room_noise_db = 0.7 * est + 0.3 * level
+            else:
+                self.room_noise_db = 0.995 * est + 0.005 * level
+
+    def _log_wake_check(self, chunk: bytes) -> None:
+        """Every ~2 s of idle uplink, log loudness and the best wake score (no audio is kept).
+        Answers "is my voice reaching the server, and how close is it to triggering?"."""
+        import array
+        import math
+
+        s = array.array("h", chunk[: len(chunk) // 2 * 2])
+        if s:
+            self._wk_sq = getattr(self, "_wk_sq", 0.0) + sum(v * v for v in s)
+            self._wk_n = getattr(self, "_wk_n", 0) + len(s)
+        if getattr(self, "_wk_n", 0) < 32000:   # 2 s at 16 kHz
+            return
+        rms = math.sqrt(self._wk_sq / self._wk_n)
+        db = 20 * math.log10(rms / 32768) if rms > 0 else -99.0
+        best = float(getattr(self.detector, "best", 0.0))
+        log.info("wake check", extra={"device": self.device.id, "audio_s": round(self._wk_n / 16000, 1),
+                                      "level_dbfs": round(db, 1), "best_score": round(best, 3),
+                                      "threshold": getattr(self.detector, "threshold", None)})
+        self._wk_sq, self._wk_n = 0.0, 0
+        if hasattr(self.detector, "best"):
+            self.detector.best = 0.0
+
+    async def _check_wake_keyword(self, seg: bytes) -> None:
+        """STT wake: transcribe one idle speech segment; wake if it contains the keyword."""
+        async def one() -> AsyncIterator[bytes]:
+            yield seg
+
+        try:
+            tr = await asyncio.wait_for(self.rt.p.stt.transcribe(one(), self.language), self.stt_s)
+        except (asyncio.TimeoutError, ProviderError) as e:
+            log.warning("wake stt failed", extra={"device": self.device.id, "err": repr(e)})
+            return
+        hit = self.detector is not None and self.detector.matches(tr.text)
+        log.info("wake check: %r", tr.text, extra={"device": self.device.id, "audio_s": round(len(seg) / 32000, 1),
+                                                    "wake": hit})
+        if hit and self.phase == "idle":
+            await self._on_wake("stt", max(0.5, float(tr.confidence)))
+
     async def on_audio(self, chunk: bytes) -> None:
         if self.muted or not chunk:
             return
         AUDIO_IN_SECONDS.labels(self.phase).inc(len(chunk) / 32000)
         if self.phase == "idle":
-            if self.detector is not None:
+            self._track_room_noise(chunk)
+            if self.detector is not None and getattr(self.detector, "needs_stt", False):
+                for seg in self.detector.feed(chunk):   # RAM only; dropped after transcription
+                    busy = getattr(self, "_kw_task", None)
+                    if busy is None or busy.done():     # one at a time; skip if still busy
+                        self._kw_task = asyncio.create_task(self._check_wake_keyword(seg))
+            elif self.detector is not None:
                 score = self.detector.process(chunk)  # RAM only; chunk is dropped after this
+                self._log_wake_check(chunk)
                 if score is not None:
                     await self._on_wake("cloud", score)
             return
@@ -341,7 +408,8 @@ class DeviceSession:
         self._cancel_guard()
         await self._flush_metrics()
         self.turn = Turn(mode, self.end_silence_ms, self.max_utt_s,
-                         skip_ms=WAKE_TAIL_SKIP_MS if mode == "wake" else 0)
+                         skip_ms=WAKE_TAIL_SKIP_MS if mode == "wake" else 0,
+                         noise_db=getattr(self, "room_noise_db", None))
         self.turn_no += 1
         await self.set_phase("listening", mode=mode)
         self.turn_task = asyncio.create_task(self._run_turn(self.turn), name=f"turn-{self.device.id}")
@@ -447,7 +515,12 @@ class DeviceSession:
                 stt_task.cancel()
                 m["outcome"] = "no_speech"
                 # Follow-up windows close silently; a real wake that hears nothing plays the cue.
-                if turn.mode in ("follow_up", "converse"):
+                if turn.mode == "converse" and self.always_listen:
+                    # Devices that ask for it (e.g. a board without a working button) keep
+                    # listening: open the next window silently instead of going idle for good.
+                    self.pending_metrics = None
+                    await self._start_turn("converse")
+                elif turn.mode in ("follow_up", "converse"):
                     self.pending_metrics = None   # an unused follow-up window isn't a turn
                     await self.set_phase("idle")
                 else:
@@ -482,6 +555,8 @@ class DeviceSession:
             t_transcript = time.monotonic()
             m["speech_end_to_transcript_ms"] = span(turn.t_speech_end, t_transcript)
             m["stt_confidence"] = round(tr.confidence, 3)
+            log.info("heard: %r", tr.text, extra={"device": self.device.id, "conf": round(tr.confidence, 3),
+                                                  "audio_ms": round(turn.audio_ms), "end": turn.end_reason})
 
             if not tr.text.strip() or tr.confidence < self.min_conf:            # FR-1.4
                 self.repeats += 1
@@ -512,6 +587,7 @@ class DeviceSession:
 
             # 5+6. LLM -> sentences -> TTS -> device, all streaming --------------------------
             reply, audio_ms, t_first_token, t_first_audio = await self._respond(user_content, m)
+            log.info("reply: %r", reply, extra={"device": self.device.id, "audio_out_ms": round(audio_ms)})
             m["transcript_to_first_token_ms"] = span(t_transcript, t_first_token)
             m["first_token_to_first_audio_ms"] = span(t_first_token, t_first_audio)
             m["end_to_first_audio_ms"] = span(turn.t_speech_end, t_first_audio)
@@ -596,6 +672,7 @@ class DeviceSession:
                     await self.send_json({"type": "tts", "state": "start"})
                     await self.set_phase("responding")
                 await self.send_json({"type": "tts", "state": "sentence", "text": sentence})
+                log.info("speaking: %r", sentence, extra={"device": self.device.id})
                 TTS_CHARS.labels(rt.p.tts.providers[0].name).inc(len(sentence))
                 gen = rt.p.tts.synthesize(sentence, self.language).__aiter__()
                 sent_deadline = loop.time() + self.tts_s * 2

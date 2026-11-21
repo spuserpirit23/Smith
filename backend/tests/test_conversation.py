@@ -300,6 +300,30 @@ async def test_hands_free_greets_then_keeps_listening(stack):
     await dev.close()
 
 
+async def test_always_listen_reopens_after_silence(stack):
+    """A board without a usable button asks for always_listen: a quiet window reopens
+    listening instead of going idle, so the user can speak at any time."""
+    secret = await stack.provision("mitra-001")
+    dev = SimDevice(stack.ws_url, "mitra-001", secret, speed=4,
+                    extra_hello={"greet": True, "hands_free": True, "always_listen": True})
+    await dev.connect()
+    await dev.wait_for("tts", lambda m: m.get("state") == "stop")
+    await dev.wait_for("state", lambda m: m["state"] == "listening" and m.get("mode") == "converse")
+    start = len(dev.log)
+    # Silence longer than hands_free_wait_s: the next listening window opens, never idle.
+    await dev.stream(silence(400))
+    await dev.wait_for("state", lambda m: m["state"] == "listening" and m.get("mode") == "converse",
+                       timeout=5)
+    assert not [m for m in dev.log[start:] if m["type"] == "state" and m["state"] == "idle"]
+    assert not [m for m in dev.log[start:] if m["type"] in ("cue", "error")]
+    # It still answers when spoken to.
+    MockSTT.script[:] = ["what is two plus two"]
+    await dev.stream(UTTER + silence(900))
+    stt = await dev.wait_for("stt")
+    assert stt["text"] == "what is two plus two"
+    await dev.close()
+
+
 async def test_builtin_camera_failure_is_reported_fast(stack):
     """A webcam that fails to capture reports it over the WebSocket; the look fails right away
     instead of waiting out capture_timeout_s."""
@@ -321,3 +345,25 @@ async def test_builtin_camera_failure_is_reported_fast(stack):
     assert r["ok"] is False and r["reason"].startswith("upload_error") and "webcam" in r["reason"]
     assert time.monotonic() - t0 < 1.5
     await dev.close()
+
+
+def test_endpoint_detector_seeded_with_room_noise_ends_turn():
+    """In a room louder than -48 dBFS, a detector starting at -60 never saw silence (every frame
+    'voiced'), so turns only ended at max_utterance. Seeded with the room level, it ends."""
+    import numpy as np
+
+    from mitra.audio.vad import EndpointDetector
+
+    def tone(db: float, ms: int) -> bytes:
+        n = 16 * ms
+        amp = 32768 * 10 ** (db / 20) * np.sqrt(2)
+        return (amp * np.sin(np.arange(n) * 2 * np.pi * 300 / 16000)).astype("<i2").tobytes()
+
+    noise, speech = tone(-30, 1000), tone(-12, 1000)
+    unseeded = EndpointDetector(end_silence_ms=800)
+    ev = [e.kind for e in unseeded.feed(noise + speech + noise + noise)]
+    assert "speech_end" not in ev            # the old behaviour: never ends
+
+    seeded = EndpointDetector(end_silence_ms=800, noise_db=-30)
+    ev = [e.kind for e in seeded.feed(noise + speech + noise + noise)]
+    assert ev[:1] == ["speech_start"] and "speech_end" in ev

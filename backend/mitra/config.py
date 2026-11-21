@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     admin_token: str = Field(default="", description="Bearer token for /v1/admin/*")
     signing_secret: str = Field(default="", description="HMAC key for short-lived upload/OTA URLs")
     public_base_url: str = "http://localhost:8080"
+    # Broker URL handed to devices. Empty -> <public host>/mqtt (via the Caddy proxy). Local runs
+    # without a proxy: Mosquitto's WebSocket listener, e.g. ws://192.168.1.10:9001
+    mqtt_public_url: str = ""
     log_level: str = "INFO"
     log_json: bool = True
 

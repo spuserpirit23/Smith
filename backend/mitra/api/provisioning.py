@@ -22,9 +22,13 @@ def make_device(device_id: str, kind: str, name: str = "", paired_main: str | No
     return dev, secret
 
 
-def nvs_csv(device: Device, secret: str, public_base_url: str) -> str:
+def nvs_csv(device: Device, secret: str, public_base_url: str, mqtt_public_url: str = "") -> str:
     """CSV for ESP-IDF's nvs_partition_gen.py. Flash the resulting .bin into the 'mitra_cfg'
-    partition so credentials never live in the firmware image or repo."""
+    partition so credentials never live in the firmware image or repo.
+
+    ``mqtt_public_url`` overrides the broker address devices use (default: ``/mqtt`` on the public
+    host, i.e. behind the Caddy proxy). Local runs without a proxy point it straight at
+    Mosquitto's WebSocket listener, e.g. ``ws://192.168.1.10:9001``."""
     u = urlparse(public_base_url)
     ws_scheme = "wss" if u.scheme == "https" else "ws"
     host = u.netloc
@@ -34,7 +38,7 @@ def nvs_csv(device: Device, secret: str, public_base_url: str) -> str:
         f"device_id,data,string,{device.id}",
         f"secret,data,string,{secret}",
         f"ws_url,data,string,{ws_scheme}://{host}/v1/device/ws",
-        f"mqtt_url,data,string,{ws_scheme}://{host}/mqtt",
+        f"mqtt_url,data,string,{mqtt_public_url or f'{ws_scheme}://{host}/mqtt'}",
         f"api_base,data,string,{public_base_url.rstrip('/')}",
     ]
     return "\n".join(rows) + "\n"

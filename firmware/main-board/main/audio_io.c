@@ -41,7 +41,9 @@ void audio_init(void)
     ESP_ERROR_CHECK(i2s_new_channel(&tx_chan, &s_tx, NULL));
     i2s_std_config_t tx_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
+        // Stereo with each sample duplicated (see audio_spk_write): classic-ESP32 16-bit MONO can
+        // swap sample pairs, which makes speech rough/blurry. The amp plays (L+R)/2.
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
         .gpio_cfg = {
             .mclk = I2S_GPIO_UNUSED,
             .bclk = CONFIG_MITRA_SPK_BCLK,
@@ -59,10 +61,16 @@ void audio_init(void)
 int audio_mic_read(int16_t *out, int samples, int timeout_ms)
 {
     if (samples > FRAME_SAMPLES) samples = FRAME_SAMPLES;
-    size_t got = 0;
-    esp_err_t err = i2s_channel_read(s_rx, s_raw, samples * sizeof(int32_t), &got, pdMS_TO_TICKS(timeout_ms));
-    if (err != ESP_OK) return 0;
-    int n = got / sizeof(int32_t);
+    // On this board a read often reports ESP_ERR_TIMEOUT early with a *partial* buffer. Callers
+    // drop short frames, so keep reading until the frame is complete (or a few tries fail):
+    // dropping that data lost ~half the mic audio (choppy speech to STT, missed wake words).
+    size_t want = samples * sizeof(int32_t), have = 0;
+    for (int tries = 0; have < want && tries < 4; tries++) {
+        size_t got = 0;
+        i2s_channel_read(s_rx, (uint8_t *)s_raw + have, want - have, &got, pdMS_TO_TICKS(timeout_ms));
+        have += got;
+    }
+    int n = have / sizeof(int32_t);
     for (int i = 0; i < n; i++) {
         int32_t v = s_raw[i] >> CONFIG_MITRA_MIC_GAIN_SHIFT;
         out[i] = v > 32767 ? 32767 : (v < -32768 ? -32768 : (int16_t)v);
@@ -72,16 +80,17 @@ int audio_mic_read(int16_t *out, int samples, int timeout_ms)
 
 void audio_spk_write(const int16_t *pcm, int samples)
 {
-    static int16_t scaled[FRAME_SAMPLES];
+    static int16_t scaled[FRAME_SAMPLES * 2];   // interleaved L,R (same sample in both)
     int vol = g_app.volume;
     if (vol > CONFIG_MITRA_VOLUME_CAP) vol = CONFIG_MITRA_VOLUME_CAP;
     // Perceptual-ish curve: square of the linear setting.
     int32_t gain_q15 = (int32_t)(vol * vol * 32767 / 10000);
     while (samples > 0) {
         int n = samples > FRAME_SAMPLES ? FRAME_SAMPLES : samples;
-        for (int i = 0; i < n; i++) scaled[i] = (int16_t)(((int32_t)pcm[i] * gain_q15) >> 15);
+        for (int i = 0; i < n; i++)
+            scaled[2 * i] = scaled[2 * i + 1] = (int16_t)(((int32_t)pcm[i] * gain_q15) >> 15);
         size_t written = 0;
-        i2s_channel_write(s_tx, scaled, n * sizeof(int16_t), &written, portMAX_DELAY);
+        i2s_channel_write(s_tx, scaled, n * 2 * sizeof(int16_t), &written, portMAX_DELAY);
         pcm += n;
         samples -= n;
     }

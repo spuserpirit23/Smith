@@ -24,15 +24,17 @@ conversation:
   playback_tail_ms: 350      # FR-3.2: mic stays gated this long after playback ends
   timeouts:                  # FR-4.4
     stt_s: 8
-    llm_s: 10
+    llm_s: 20                # local CPU models: time to first word (whole reply gets 2x)
     tts_s: 8
   history:
     persist: false           # FR-4.2: off unless Smith & Sky approves; per-device opt-in also required
     retention_days: 7
 
 wake:
-  provider: ${MITRA_WAKE_PROVIDER:-none}   # none | openwakeword | mock
-  threshold: 0.5
+  provider: ${MITRA_WAKE_PROVIDER:-none}   # none | openwakeword | stt | mock
+  # stt: wake when the STT hears one of these words (comma-separated). No training needed.
+  words: ${MITRA_WAKE_WORDS:-smith}
+  threshold: ${MITRA_WAKE_THRESHOLD:-0.5}   # lower = triggers more easily (stock models on non-US voices: ~0.25)
   refractory_s: 2.0
   # Custom "Hey Smith" model trained with openWakeWord. Until trained, a stock model such as
   # "hey_jarvis" can stand in for pipeline testing.
@@ -69,8 +71,8 @@ llm:
     # hosted API also works (llama.cpp server, vLLM, Groq, Gemini...). See docs/LOCAL_MODELS.md.
     base_url: ${LLM_BASE_URL:-http://localhost:11434/v1}
     api_key: ${LLM_API_KEY:-}
-    model: ${LLM_MODEL:-qwen3:1.7b}
-    # Qwen3 is a thinking model: "none" turns reasoning off so replies start immediately.
+    model: ${LLM_MODEL:-gemma3:4b}
+    # "none" turns reasoning off on hybrid thinking models (Qwen3); non-thinking models ignore it.
     reasoning_effort: ${LLM_REASONING_EFFORT:-none}   # none|low|...; empty = don't send the field
 
 tts:
@@ -97,6 +99,7 @@ vision:
   provider: ${MITRA_VISION_PROVIDER:-openai_compat} # openai_compat | bedrock | anthropic | rekognition | mock | none
   min_confidence: 0.6       # FR-5.2
   capture_timeout_s: 6
+  describe_timeout_s: ${VISION_DESCRIBE_TIMEOUT_S:-10}   # local CPU models: raise (first call loads the model)
   default_camera_role: user # which paired camera answers "what do you see?"
   intents:                  # utterances that trigger a capture (case-insensitive regex)
     - "\\b(can|do|could) you see\\b"
@@ -120,13 +123,17 @@ vision:
     api_key: ${VISION_API_KEY:-}
     model: ${VISION_MODEL:-gemma3:4b}
     reasoning_effort: ${VISION_REASONING_EFFORT:-}
+    # json: ask for structured JSON (capable models). plain: ask for a short description (small
+    # local models such as moondream that can't follow the JSON format).
+    prompt_style: ${VISION_PROMPT_STYLE:-json}
+    timeout_s: ${VISION_TIMEOUT_S:-20}   # raise for local CPU models (first call also loads the model)
   rekognition:
     region: ${AWS_REGION:-ap-south-1}
 
 storage:
   # Used for OTA firmware images and (only if enabled) debug frame retention.
   provider: ${MITRA_STORAGE_PROVIDER:-local}        # local | s3 (any S3-compatible: AWS, R2, MinIO, GCS interop)
-  retain_debug_frames: false                        # FR-5.5
+  retain_debug_frames: ${MITRA_RETAIN_DEBUG_FRAMES:-false}   # FR-5.5: keep only for debugging
   local:
     root: ${MITRA_DATA_DIR:-/data}
   s3:

@@ -117,13 +117,14 @@ class CameraService:
             except ProviderError as e:
                 return CaptureOutcome(False, reason=f"upload_error:{e}", camera_id=cam)
             capture_ms = (time.monotonic() - t0) * 1000
-            if self.cfg.get("storage.retain_debug_frames", False):
+            if str(self.cfg.get("storage.retain_debug_frames", False)).strip().lower() in ("1", "true", "yes"):
                 await self.storage.put(f"frames/{cam}/{job_id}.jpg", jpeg, "image/jpeg")
             t1 = time.monotonic()
             try:
-                result = await asyncio.wait_for(self.vision.describe(jpeg, question), 10)
+                result = await asyncio.wait_for(self.vision.describe(jpeg, question),
+                                                float(self.cfg.get("vision.describe_timeout_s", 10)))
             except (ProviderError, asyncio.TimeoutError) as e:
-                log.warning("vision failed", extra={"err": str(e)})
+                log.warning("vision failed", extra={"err": repr(e)})
                 return CaptureOutcome(False, reason="vision_error", camera_id=cam, capture_ms=capture_ms)
             finally:
                 del jpeg  # FR-5.5: raw frame dropped as soon as analysis returns

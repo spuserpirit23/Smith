@@ -19,6 +19,33 @@ Reply with JSON only, no prose around it:
 image and your answer are>, "person_present": <true|false>}}"""
 
 
+# Small models (moondream) garble their first word when told to "answer in one short sentence",
+# but answer cleanly to an open question; we trim the answer ourselves instead.
+PLAIN_VISION_PROMPT = "What is in this image?"
+
+_PERSON_WORDS = re.compile(r"\b(person|people|man|men|woman|women|boy|girl|child|children|kid|kids|"
+                           r"baby|someone|face|figure)\b", re.I)
+_OPENERS = re.compile(r"^(the|this) (image|photo|picture|scene) (shows|features|depicts|presents|"
+                      r"captures|displays|contains|is of)\s+", re.I)
+
+
+def parse_plain_vision(text: str) -> VisionResult:
+    """For small vision models that can't follow the JSON format: keep the first sentence or two,
+    phrased as the robot speaking ("I can see ...")."""
+    t = " ".join((text or "").split())
+    if t and t[0].islower() and " " in t:   # dropped first characters ("urn of a house ...")
+        t = t.split(" ", 1)[1]
+    sentences = re.split(r"(?<=[.!?])\s+", t)
+    t = " ".join(sentences[:2]).strip()
+    if len(t) > 240:
+        t = t[:240].rsplit(" ", 1)[0].rstrip(",;:") + "."
+    t = _OPENERS.sub("I can see ", t)
+    t = t[:1].upper() + t[1:]
+    if not t:
+        return VisionResult("I can't make out anything clearly.", 0.0, [], None)
+    return VisionResult(t, 0.7, [], bool(_PERSON_WORDS.search(t)))
+
+
 def parse_vision_json(text: str) -> VisionResult:
     m = re.search(r"\{.*\}", text, re.S)
     if not m:
@@ -100,12 +127,14 @@ class AnthropicVision:
 class OpenAICompatVision:
     name = "openai_compat"
 
-    def __init__(self, base_url: str, api_key: str, model: str, reasoning_effort: str = ""):
+    def __init__(self, base_url: str, api_key: str, model: str, reasoning_effort: str = "",
+                 prompt_style: str = "json", timeout_s: float = 20):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.reasoning_effort = reasoning_effort
-        self._client = httpx.AsyncClient(timeout=20)
+        self.plain = prompt_style == "plain"   # small models: plain description, no JSON
+        self._client = httpx.AsyncClient(timeout=timeout_s)
 
     async def describe(self, jpeg: bytes, question: str) -> VisionResult:
         data_uri = "data:image/jpeg;base64," + base64.b64encode(jpeg).decode()
@@ -116,20 +145,23 @@ class OpenAICompatVision:
                 "role": "user",
                 "content": [
                     {"type": "image_url", "image_url": {"url": data_uri}},
-                    {"type": "text", "text": VISION_PROMPT.format(question=question)},
+                    {"type": "text", "text": PLAIN_VISION_PROMPT if self.plain else VISION_PROMPT.format(question=question)},
                 ],
             }],
         }
         if self.reasoning_effort:
             body["reasoning_effort"] = self.reasoning_effort
+        if self.plain:
+            body["temperature"] = 0      # small models ramble less and stay consistent
+            body["max_tokens"] = 90
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         try:
             r = await self._client.post(f"{self.base_url}/chat/completions", json=body, headers=headers)
             r.raise_for_status()
             text = r.json()["choices"][0]["message"]["content"]
         except Exception as e:  # noqa: BLE001
-            raise ProviderError(f"vision http failed: {e}") from e
-        return parse_vision_json(text)
+            raise ProviderError(f"vision http failed: {e!r}") from e
+        return parse_plain_vision(text) if self.plain else parse_vision_json(text)
 
 
 class RekognitionVision:

@@ -27,12 +27,16 @@ class EndpointDetector:
         min_speech_ms: int = 200,
         margin_db: float = 12.0,
         floor_db: float = -52.0,
+        noise_db: float | None = None,
     ):
         self.end_silence_ms = end_silence_ms
         self.min_speech_ms = min_speech_ms
         self.margin_db = margin_db
         self.floor_db = floor_db
-        self.noise_db = -60.0
+        # Start from the room's measured noise when the caller knows it. Starting at -60 in a room
+        # louder than -48 dBFS meant every frame counted as speech, so the noise floor could never
+        # adapt and turns only ended at max_utterance.
+        self.noise_db = -60.0 if noise_db is None else noise_db
         self.reset()
 
     def reset(self) -> None:

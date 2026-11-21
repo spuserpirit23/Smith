@@ -62,6 +62,14 @@ menu "Mitra behaviour"
             bool "device"
     endchoice
 
+    config MITRA_HANDS_FREE
+        bool "Hands-free: always listening, no wake word or button needed"
+        default n
+        help
+            Off (default): after the power-on greeting the robot waits for the wake word
+            (cloud wake mode) or the button. On: after each reply, and after a quiet spell, the
+            backend opens a new listening turn, so you can just talk to it with no wake word.
+
     config MITRA_PREROLL_MS
         int "Pre-roll sent when speech starts (ms)"
         default 800

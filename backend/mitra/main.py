@@ -72,7 +72,7 @@ def create_app(settings: Settings | None = None, runtime: Runtime | None = None)
         log.info("mitra backend started", extra={
             "stt": rt.p.stt.name, "llm": rt.p.llm.name, "tts": [p.name for p in rt.p.tts.providers],
             "wake": rt.p.wake.name if rt.p.wake else None, "vision": rt.p.vision.name if rt.p.vision else None,
-            "mqtt": bool(settings.mqtt_host), "db": "postgres" if settings.database_url else "memory"})
+            "mqtt": bool(settings.mqtt_host), "db": ("file" if settings.database_url.startswith("file:") else "postgres") if settings.database_url else "memory"})
         try:
             yield
         finally:
@@ -208,7 +208,7 @@ def create_app(settings: Settings | None = None, runtime: Runtime | None = None)
             raise HTTPException(400, str(e)) from None
         await rt.sync_broker_auth()
         return {"id": dev.id, "kind": dev.kind, "secret": secret,
-                "nvs_csv": nvs_csv(dev, secret, settings.public_base_url),
+                "nvs_csv": nvs_csv(dev, secret, settings.public_base_url, settings.mqtt_public_url),
                 "note": "The secret is shown once. Flash it with tools/flash_credentials.sh; do not commit it."}
 
     def device_view(d) -> dict:
